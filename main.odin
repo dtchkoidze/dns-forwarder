@@ -1,10 +1,8 @@
 package main
 
 import "core:encoding/endian"
-import "core:encoding/hex"
 import "core:log"
 import "core:net"
-import "core:os"
 import "core:strings"
 
 Qtype :: enum u16 {
@@ -92,7 +90,6 @@ encode_dns_query :: proc(q: Dns_Query) -> []byte {
 	flags: u16
 	// |= makes sure dont rewrite whole shenanigans
 
-
 	if q.header.qr {flags |= 1 << 15}
 	flags |= u16(q.header.opcode & 0xF) << 11
 	if q.header.aa {flags |= 1 << 10}
@@ -135,7 +132,14 @@ encode_dns_query :: proc(q: Dns_Query) -> []byte {
 	return b[:]
 }
 
-// +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+
+decode_dns_query :: proc(raw: []byte) -> Dns_Query {
+	q: Dns_Query
+	return q
+}
+
+
+// 	  +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
 //    |                                               |
 //    /                                               /
 //    /                      NAME                     /
@@ -219,7 +223,6 @@ Worker_Interface :: struct {
 }
 
 
-
 // ok instead of cmd tool
 // this one should act as a udp 53 server,
 // that forwards dns queries to 8888:53 dns server and returns answer back
@@ -229,70 +232,42 @@ main :: proc() {
 	logger := log.create_console_logger()
 	context.logger = logger
 	log.info("main...")
-	log.infof("args len is %d", len(os.args))
-
-	if len(os.args) <= 1 {
-		log.error("please provide a host to resolve")
-		os.exit(1)
-	}
-
-	domain_name := os.args[1]
-	log.infof("resolving ip addr of %s...", domain_name)
-
-	q := encode_dns_query(
-	Dns_Query {
-		header = Dns_Header {
-			id      = 22,
-			qr      = false,
-			rd      = true,
-			qdcount = 1, //1 quest
-			// fuck otherfields for now
-		},
-		question = Dns_Question {
-			qname  = transmute([]byte)domain_name,
-			qtype  = .A,
-			qclass = 1, //whatever the fuck this should be 1 is IN as in INTERNET what else mmm
-			//shi
-		},
-	},
-	)
-
-	res, err := hex.encode(q[:], context.allocator)
-	if err != nil do return
-	log.infof("hex: %s", res)
-
-	// create udp socket
-	socket, serr := net.create_socket(.IP4, .UDP)
+	socket, serr := net.make_unbound_udp_socket(.IP4)
 	if serr != nil {
-		log.fatalf("err happened %v", serr)
+		log.fatalf("socket create err: %v", serr)
+	}
+	log.infof("udp socket created")
+
+	bind_err := net.bind(socket, net.Endpoint{net.IP4_Address{127, 0, 0, 1}, 53})
+	if bind_err != nil {
+		log.fatalf("bind_err: %v", bind_err)
 	}
 
-	udp_socket := socket.(net.UDP_Socket)
+	query_buf: [512]byte
+	resp_buf: [512]byte
 
-	written, sserr := net.send_udp(
-	udp_socket,
-	q[:],
-	net.Endpoint {
-		address = net.IP4_Address{8, 8, 8, 8},
-		port    = 53,
-		//
-	},
-	)
+	for {
+		q_bytes_read, from, recverr := net.recv_udp(socket, query_buf[:])
+		if recverr != nil {
+			log.fatalf("recv error: %v", recverr)
+		}
+		log.infof("%d q_bytes_read from %v", q_bytes_read, from)
 
-	if sserr != nil {
-		log.fatalf("udp send err: %v", sserr)
+		up_sock, _ := net.make_unbound_udp_socket(.IP4)
+		net.bind(up_sock, net.Endpoint{net.IP4_Address{0, 0, 0, 0}, 0})
+
+		net.send_udp(
+			up_sock,
+			query_buf[:q_bytes_read],
+			net.Endpoint{address = net.IP4_Address{8, 8, 8, 8}, port = 53},
+		)
+
+		resp_bytes_read, _, _ := net.recv_udp(up_sock, resp_buf[:])
+		log.infof("%d bytes from upstream", resp_bytes_read)
+
+		net.close(up_sock)
+
+		net.send_udp(socket, resp_buf[:resp_bytes_read], from)
+		log.infof("forwarded response back to client")
 	}
-
-	log.infof("wrote %d bytes", written)
-	recv_buf: [512]byte
-	bytes_read, remote_endpoint, recverr := net.recv_udp(udp_socket, recv_buf[:])
-	if recverr != nil {
-		log.fatalf("recv error: %v", recverr)
-	}
-
-	response := recv_buf[:bytes_read]
-	log.infof("response hex: %s", hex.encode(response, context.allocator))
-
-	decoded := decode_dns_response(response)
-	log.infof("decoded resp: %v", decoded)
 }
